@@ -1,0 +1,76 @@
+##################################
+# optimisation parameters
+###################################
+# learning rate for potential
+lr_ary: [1.0, 0.5]
+n_iter_ary: [50, 950]
+kmax_optim_ary: [0.5, 1.0] # range of beams to be optimised (ratio to kmax_optim)
+
+#initial parameters ###
+thickness_init:  350
+defocus_init:    -100
+sourcesize_init: 0.0
+ratio_GaussToLorentz: 1
+
+tilt_rad_init       : [0,0]
+coma_init           : [0,0]
+twofold_stig_init   : [0,0]
+threefold_stig_init : [0,0]
+
+# learning rate for other parameters
+lr_factor_thickness:  0.02
+lr_factor_defocus:    0.02
+lr_factor_sourcesize: 0.002
+
+lr_factor_tilt          : 0.0004
+lr_factor_coma          : 20
+lr_factor_twofold_stig  : 0.2
+lr_factor_threefold_stig: 20
+
+lr_factor_probe_position: 0.0001
+
+# option for optimisation
+optim_potential : True
+optim_thickness : True
+optim_defocus   : True
+
+optim_sourcesize: False
+optim_ratio_GtoL: False
+
+optim_tilt          : False
+optim_coma          : False
+optim_twofold_stig  : False
+optim_threefold_stig: False
+
+optim_probe_position: False
+
+# maximum range of Fourier components of potential Ug (ratio to k0)
+kmax_optim       : 2.1
+# maximum Fourier component to calc S-matrix (ratio to k0 in g and h vectors)
+beam_outer_angle : 1.5
+# maximum angle of CBED pattern to calc loss (ratio to k0)
+kmax_crop_loss_calc : 1.5
+
+# sampling of potential grid in Ang, not scan
+potential_grid_sampling: 0.1
+
+
+###############################
+# other parameters
+################################
+# params for approximating matrix exponential
+matrix_scale_factor   : 32
+chunk_size_CBED_calc  : 8
+# params for loss function
+regularize_factor     : 0.0
+# params for abs potential
+abs_pot_factor: 0.1
+# options
+lowpass_measured_data : False
+kmin_cutoff_adjust    : False
+use_cpu               : False
+# obf calculation
+obf_mode : 'thick'
+fft_fast : True
+obf_include_sourcesize : False
+obf_normalize_mode     : 'noise'
