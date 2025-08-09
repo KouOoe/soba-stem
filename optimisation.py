@@ -3,15 +3,12 @@ import torch
 import numpy as np
 from matplotlib import pyplot as plt
 import scipy.ndimage as ndimage
-from tqdm import tqdm
+import torch.nn.functional as F
 
-from torch.cuda.amp import autocast, GradScaler
-
-from smatrix_optim.utility import cbed_resize_rotation, center_of_mass_torch, corr_shift_cbed_torch
 
 def run_optimiser(
-        smatrix_torch, 
-        smatrix_np, 
+        smatrix_fwd_calc, 
+        smatrix_preprocess, 
         measured_data,
         initial_params, 
         data_loader_params,
@@ -22,8 +19,8 @@ def run_optimiser(
     Run the optimization loop for S-matrix refinement.
     
     Parameters:
-      smatrix_torch : The torch version of the S-matrix object.
-      smatrix_np    : The numpy version (used for beam selection and plotting).
+      smatrix_fwd_calc : The torch version of the S-matrix object.
+      smatrix_preprocess    : The numpy version (used for beam selection and plotting).
       measured_data : Torch tensor containing the measured 4D STEM data.
       Ug_from_OBF   : FFT of the OBF image (used for setting potential).
       initial_params: Dictionary containing initial tensors:
@@ -37,18 +34,21 @@ def run_optimiser(
       results: Dictionary with final optimized parameters and loss history.
     """
     # crop the measured data
-    nky_crop_losscalc = int(config['kmax_crop_loss_calc'] * smatrix_np.k0 / data_loader_params['sampling_diff'][0]*2)
-    nkx_crop_losscalc = int(config['kmax_crop_loss_calc'] * smatrix_np.k0 / data_loader_params['sampling_diff'][1]*2)
-    com_measured_data = center_of_mass_torch(torch.mean(measured_data, dim=(0,1)), device=device)
-    print(nky_crop_losscalc, nkx_crop_losscalc)
+    nky_crop_losscalc = int(config['kmax_crop_loss_calc'] * smatrix_preprocess.k0 / data_loader_params['sampling_diff'][0]*2)
+    nkx_crop_losscalc = int(config['kmax_crop_loss_calc'] * smatrix_preprocess.k0 / data_loader_params['sampling_diff'][1]*2)
+    com_measured_data = ndimage.center_of_mass(torch.sum(measured_data, dim=(0,1)).cpu().detach().numpy())
+    #center_of_mass_torch(torch.mean(measured_data, dim=(0,1)), device=device)
+    #print(nky_crop_losscalc, nkx_crop_losscalc)
 
     # Crop the measured data to the center
-    start_y = int(com_measured_data[0].to('cpu').detach().numpy()-nky_crop_losscalc/2) #round(com_measured_data[0].to('cpu').detach().numpy()-nky_crop_losscalc/2) 
-    start_x = int(com_measured_data[1].to('cpu').detach().numpy()-nkx_crop_losscalc/2) #round(com_measured_data[1].to('cpu').detach().numpy()-nkx_crop_losscalc/2)
+    start_y = int(round(com_measured_data[0]-(nky_crop_losscalc-1)/2)) 
+    start_x = int(round(com_measured_data[1]-(nkx_crop_losscalc-1)/2)) 
+    #start_y = int(round(com_measured_data[0].to('cpu').detach().numpy()-(nky_crop_losscalc-1)/2)) #round(com_measured_data[0].to('cpu').detach().numpy()-nky_crop_losscalc/2) 
+    #start_x = int(round(com_measured_data[1].to('cpu').detach().numpy()-(nkx_crop_losscalc-1)/2)) #round(com_measured_data[1].to('cpu').detach().numpy()-nkx_crop_losscalc/2)
     end_y   = start_y + nky_crop_losscalc #round(com_measured_data[0].to('cpu').detach().numpy()+nky_crop_losscalc/2) #
     end_x   = start_x + nkx_crop_losscalc #round(com_measured_data[1].to('cpu').detach().numpy()+nkx_crop_losscalc/2) #
     measured_data     = measured_data[:,:,start_y:end_y, start_x:end_x]
-    print(measured_data.size())
+    #print(measured_data.size())
     
     # Unpack initial parameters (you might include more than these)
     Ug_from_OBF = initial_params['potential_Ug'] # torch.tensor
@@ -82,8 +82,8 @@ def run_optimiser(
     filter_abs = torch.ones_like(torch.tensor(Ug_from_OBF), dtype=torch.complex64, device=device) #np.ones(np.shape(Ug_from_OBF), dtype=np.complex64)
     
     # diff space sampling ratio (estimated to measured data) and rotation offset
-    pixel_ratio_diff_est_to_meas_y = smatrix_torch.dqy/data_loader_params['sampling_diff'][0]
-    pixel_ratio_diff_est_to_meas_x = smatrix_torch.dqx/data_loader_params['sampling_diff'][1]
+    pixel_ratio_diff_est_to_meas_y = smatrix_fwd_calc.dqy/data_loader_params['sampling_diff'][0]
+    pixel_ratio_diff_est_to_meas_x = smatrix_fwd_calc.dqx/data_loader_params['sampling_diff'][1]
     rotation_offset_diff           = data_loader_params['rot_offset_deg'] * np.pi / 180.0
 
     print("Starting optimization loop...")
@@ -98,10 +98,10 @@ def run_optimiser(
         kmax_cutoff = kmax_cutoff_val * config['kmax_optim']
         kmin_cutoff = np.where((i_kcutoff==0) or (config['kmin_cutoff_adjust']==False), 0, config['kmax_optim_ary'][i_kcutoff-1])
         # Optionally also update kmin_cutoff as needed:
-        kmax_cutoff_beam = (1 - np.max([smatrix_np.dqy, smatrix_np.dqx]) / smatrix_np.k0) * kmax_cutoff
-        kmin_cutoff_beam = (1 - np.max([smatrix_np.dqy, smatrix_np.dqx]) / smatrix_np.k0) * kmin_cutoff
+        kmax_cutoff_beam = (1 - np.max([smatrix_preprocess.dqy, smatrix_preprocess.dqx]) / smatrix_preprocess.k0) * kmax_cutoff
+        kmin_cutoff_beam = (1 - np.max([smatrix_preprocess.dqy, smatrix_preprocess.dqx]) / smatrix_preprocess.k0) * kmin_cutoff
         # (update beams from image; typically a call like:)
-        smatrix_np.set_beams_from_image(
+        smatrix_preprocess.set_beams_from_image(
                                         image_fft=Ug_from_OBF, 
                                         amp_cutoff=0e-10,
                                         show_beams=False, 
@@ -110,12 +110,12 @@ def run_optimiser(
                                         )
         
         # Get the reference potential from OBF on current beams
-        Wg_from_OBF = Ug_from_OBF[smatrix_np.beam_indices[0], smatrix_np.beam_indices[1]]
+        Wg_from_OBF = Ug_from_OBF[smatrix_preprocess.beam_indices[0], smatrix_preprocess.beam_indices[1]]
         
         # Create initial potential factors for optimization.
         # For instance, define potential tensors from the filters:
-        Wg_els = filter_els[smatrix_np.beam_indices[0, :smatrix_np.n_beam//2], smatrix_np.beam_indices[1, :smatrix_np.n_beam//2]].clone().detach().requires_grad_(True)
-        Wg_abs = filter_abs[smatrix_np.beam_indices[0, :smatrix_np.n_beam//2], smatrix_np.beam_indices[1, :smatrix_np.n_beam//2]].clone().detach().requires_grad_(True)
+        Wg_els = filter_els[smatrix_preprocess.beam_indices[0, :smatrix_preprocess.n_beam//2], smatrix_preprocess.beam_indices[1, :smatrix_preprocess.n_beam//2]].clone().detach().requires_grad_(True)
+        Wg_abs = filter_abs[smatrix_preprocess.beam_indices[0, :smatrix_preprocess.n_beam//2], smatrix_preprocess.beam_indices[1, :smatrix_preprocess.n_beam//2]].clone().detach().requires_grad_(True)
         
         # Define learning rates for these groups.
         current_lr = lr  # From the config for this stage
@@ -175,35 +175,35 @@ def run_optimiser(
                         #            device=device,
                         #            dtype=torch.complex64)
             # First half: use Wg_els
-            pot_optim[0, smatrix_np.beam_indices[0, :smatrix_np.n_beam//2],
-                        smatrix_np.beam_indices[1, :smatrix_np.n_beam//2]] = \
-                obf_initial[:smatrix_np.n_beam//2] * Wg_els
+            pot_optim[0, smatrix_preprocess.beam_indices[0, :smatrix_preprocess.n_beam//2],
+                        smatrix_preprocess.beam_indices[1, :smatrix_preprocess.n_beam//2]] = \
+                obf_initial[:smatrix_preprocess.n_beam//2] * Wg_els
             # Second half: use Wg_abs (scaled)
-            pot_optim[1, smatrix_np.beam_indices[0, :smatrix_np.n_beam//2],
-                        smatrix_np.beam_indices[1, :smatrix_np.n_beam//2]] = \
-                obf_initial[:smatrix_np.n_beam//2] * config['abs_pot_factor'] * Wg_abs
+            pot_optim[1, smatrix_preprocess.beam_indices[0, :smatrix_preprocess.n_beam//2],
+                        smatrix_preprocess.beam_indices[1, :smatrix_preprocess.n_beam//2]] = \
+                obf_initial[:smatrix_preprocess.n_beam//2] * config['abs_pot_factor'] * Wg_abs
 
             if kmin_cutoff==0:
-                pot_optim[0, smatrix_np.beam_indices[0, smatrix_np.n_beam//2+1:smatrix_np.n_beam], 
-                        smatrix_np.beam_indices[1, smatrix_np.n_beam//2+1:smatrix_np.n_beam]] = \
-                            obf_initial[smatrix_np.n_beam//2+1:smatrix_np.n_beam] * torch.flip((Wg_els).real + 1j*(-Wg_els).imag, dims=(0,))
+                pot_optim[0, smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam], 
+                        smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam]] = \
+                            obf_initial[smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam] * torch.flip((Wg_els).real + 1j*(-Wg_els).imag, dims=(0,))
 
-                pot_optim[1, smatrix_np.beam_indices[0, smatrix_np.n_beam//2+1:smatrix_np.n_beam],
-                        smatrix_np.beam_indices[1, smatrix_np.n_beam//2+1:smatrix_np.n_beam]] = \
-                            obf_initial[smatrix_np.n_beam//2+1:smatrix_np.n_beam] * torch.flip((Wg_abs).real + 1j*(-Wg_abs).imag, dims=(0,)) * config['abs_pot_factor']
+                pot_optim[1, smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam],
+                        smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam]] = \
+                            obf_initial[smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam] * torch.flip((Wg_abs).real + 1j*(-Wg_abs).imag, dims=(0,)) * config['abs_pot_factor']
             else:
-                pot_optim[0, smatrix_np.beam_indices[0, smatrix_np.n_beam//2:smatrix_np.n_beam],
-                        smatrix_np.beam_indices[1, smatrix_np.n_beam//2:smatrix_np.n_beam]] = \
-                            obf_initial[smatrix_np.n_beam//2:smatrix_np.n_beam] * torch.flip((Wg_els).real + 1j*(-Wg_els).imag, dims=(0,))
-                pot_optim[1, smatrix_np.beam_indices[0, smatrix_np.n_beam//2:smatrix_np.n_beam],
-                        smatrix_np.beam_indices[1, smatrix_np.n_beam//2:smatrix_np.n_beam]] = \
-                            obf_initial[smatrix_np.n_beam//2:smatrix_np.n_beam] * torch.flip((Wg_abs).real + 1j*(-Wg_abs).imag, dims=(0,)) * config['abs_pot_factor']
+                pot_optim[0, smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam],
+                        smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam]] = \
+                            obf_initial[smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam] * torch.flip((Wg_els).real + 1j*(-Wg_els).imag, dims=(0,))
+                pot_optim[1, smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam],
+                        smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam]] = \
+                            obf_initial[smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam] * torch.flip((Wg_abs).real + 1j*(-Wg_abs).imag, dims=(0,)) * config['abs_pot_factor']
 
             # Compute the A-matrix from the potential. This is a function call
-            Amatrix_tmp = smatrix_torch.make_Amatrix_from_pot_vector_ChatGPT([pot_optim[0], pot_optim[1]])
+            Amatrix_tmp = smatrix_fwd_calc.make_Amatrix_from_pot_vector([pot_optim[0], pot_optim[1]])
             
             # Compute the S-matrix from the A-matrix via your Pade approximant function.
-            Smatrix_tmp = smatrix_torch.calc_Smatrix_from_Amatrix_Pade_ChatGPT(
+            Smatrix_tmp = smatrix_fwd_calc.calc_Smatrix_from_Amatrix_Pade(
                 Amatrix=Amatrix_tmp,
                 thickness=thickness,
                 scale_factor=config['matrix_scale_factor']
@@ -211,7 +211,7 @@ def run_optimiser(
             
             # Compute the estimated CBED from the S-matrix.
             estimated_data = torch.zeros(measured_data.shape, device=device, dtype=torch.float32)
-            estimated_data = smatrix_torch.calc_CBED_from_Smatrix_vector_from_imported_scan_pos_ChatGPT(
+            estimated_data = smatrix_fwd_calc.calc_CBED_from_Smatrix_vector_from_imported_scan_pos(
                 smatrix=Smatrix_tmp,
                 scan_ary=probe_position,
                 chunk_size=config['chunk_size_CBED_calc'],
@@ -224,9 +224,10 @@ def run_optimiser(
                 kmax_calc_frac= config['beam_outer_angle'] * 1.25,
                 show_progress=False,
             )
+
             # Optionally apply partial coherence
             estimated_data = torch.fft.ifftshift(estimated_data, dim=(-2,-1))
-            estimated_data = smatrix_torch.source_blur_cbed_GandL(
+            estimated_data = smatrix_fwd_calc.source_blur_cbed_GandL(
                 estimated_data,
                 n_scan=(probe_position.shape[0], probe_position.shape[1]),
                 source_fwhm_G=source_fwhm,
@@ -235,39 +236,79 @@ def run_optimiser(
             )
             if config['lowpass_measured_data']:
                 estimated_data = torch.fft.ifft2(torch.fft.fft2(estimated_data, dim=(-2,-1)) *
-                                        ((smatrix_torch.qgrid[0]**2 + smatrix_torch.qgrid[1]**2) < (smatrix_torch.k0 * config['kmax_optim'])**2)
+                                        ((smatrix_fwd_calc.qgrid[0]**2 + smatrix_fwd_calc.qgrid[1]**2) < (smatrix_fwd_calc.k0 * config['kmax_optim'])**2)
                                         ).real
 
-            # resize and rotate the estimated data to match the measured data    
-            nky_resize_estimated = round(estimated_data.size()[2]*pixel_ratio_diff_est_to_meas_y.item())
-            nkx_resize_estimated = round(estimated_data.size()[3]*pixel_ratio_diff_est_to_meas_x.item())
+            if pixel_ratio_diff_est_to_meas_x.item() != 1 or pixel_ratio_diff_est_to_meas_y.item() != 1 or rotation_offset_diff != 0:
+                # resize and rotate the estimated data to match the measured data    
+                nky_resize_estimated = round(estimated_data.size()[2]*pixel_ratio_diff_est_to_meas_y.item())
+                nkx_resize_estimated = round(estimated_data.size()[3]*pixel_ratio_diff_est_to_meas_x.item())
 
-            #if config["pixel_ratio_diff_est_to_meas"]==[1,1]:
-            estimated_data       = cbed_resize_rotation(estimated_data,
-                                                        angle_rad=torch.tensor(-rotation_offset_diff, device=device), 
-                                                        size=(nky_resize_estimated, nkx_resize_estimated))
+                #if config["pixel_ratio_diff_est_to_meas"]==[1,1]:
+                estimated_data       = cbed_resize_rotation(estimated_data,
+                                                            angle_rad=torch.tensor(-rotation_offset_diff, device=device), 
+                                                            size=(nky_resize_estimated, nkx_resize_estimated))
             
             # Crop the estimated data to match the measured data
-            if iter_idx == 0:
-                com_estimated_data = center_of_mass_torch(torch.mean(estimated_data, dim=(0,1)), device=device)
-            start_y = int(com_estimated_data[0].to('cpu').detach().numpy()-nky_crop_losscalc/2)
-            start_x = int(com_estimated_data[1].to('cpu').detach().numpy()-nkx_crop_losscalc/2)
+            #if iter_idx == 0:
+            '''
+            com_estimated_data = center_of_mass_torch(torch.mean(estimated_data, dim=(0,1)), device=device)
+            start_y = int(round(com_estimated_data[0].to('cpu').detach().numpy()-(nky_crop_losscalc-1)/2))
+            start_x = int(round(com_estimated_data[1].to('cpu').detach().numpy()-(nkx_crop_losscalc-1)/2))
+            '''
+            com_estimated_data = ndimage.center_of_mass(torch.sum(estimated_data, dim=(0,1)).cpu().detach().numpy())
+            start_y = int(round(com_estimated_data[0]-(nky_crop_losscalc-1)/2))
+            start_x = int(round(com_estimated_data[1]-(nkx_crop_losscalc-1)/2))
             end_y   = start_y + nky_crop_losscalc
             end_x   = start_x + nkx_crop_losscalc
             estimated_data = estimated_data[:,:,start_y:end_y, start_x:end_x]
+
+            #print(estimated_data.size(), measured_data.size())
             
-            estimated_data, measured_data = corr_shift_cbed_torch(
+            '''
+            estimated_data = corr_shift_cbed_torch(
                 cbed_1=estimated_data/torch.sum(estimated_data, dim=(2,3), keepdims=True),
                 cbed_2=measured_data/torch.sum(measured_data, dim=(2,3), keepdims=True),
                 crop_y=nky_crop_losscalc,
                 crop_x=nkx_crop_losscalc,
                 device=device,
             )
+            '''
+            #print(estimated_data.size(), measured_data.size())
 
             # Calculate the loss (e.g., L2 norm between normalized estimated and measured CBED)
-            loss = (torch.norm(estimated_data / torch.sum(estimated_data, dim=(2,3), keepdims=True)
-                            - measured_data / torch.sum(measured_data, dim=(2,3), keepdims=True))**2 +
-                    config['regularize_factor'] * torch.sum(torch.abs(pot_optim)))
+            if "loss_function" in config:
+                if config["loss_function"] == "L2":
+                    loss = (torch.norm(estimated_data - measured_data )**2 + config['regularize_factor'] * torch.sum(torch.abs(pot_optim)))
+                elif config["loss_function"] == "L2_normalised":
+                    loss = (torch.norm(estimated_data / torch.sum(estimated_data, dim=(2,3), keepdims=True)
+                                                - measured_data / torch.sum(measured_data, dim=(2,3), keepdims=True))**2 + config['regularize_factor'] * torch.sum(torch.abs(pot_optim)))
+                elif config["loss_function"] == "L1":
+                    loss = (torch.norm(estimated_data - measured_data, p=1) + config['regularize_factor'] * torch.sum(torch.abs(pot_optim)))
+                elif config["loss_function"] == "pearson":
+                    loss = -((estimated_data - estimated_data.mean()) / estimated_data.std() * (measured_data - measured_data.mean()) / measured_data.std()).mean()
+                elif config["loss_function"] == "pearson_and_L2":
+                    if iter_idx % 100 <50:
+                        loss = -((estimated_data - estimated_data.mean()) / estimated_data.std() * (measured_data - measured_data.mean()) / measured_data.std()).mean()
+                    else:
+                        loss = (torch.norm(estimated_data / torch.sum(estimated_data, dim=(2,3), keepdims=True)
+                                    - measured_data / torch.sum(measured_data, dim=(2,3), keepdims=True))**2 +
+                            config['regularize_factor'] * torch.sum(torch.abs(pot_optim)))
+                elif config["loss_function"] == "L2_scrach":
+                    loss = torch.sum((estimated_data - measured_data)**2) + config['regularize_factor'] * torch.sum(torch.abs(pot_optim))
+                elif config["loss_function"] == "poisson":
+                    constant_factor = 100
+                    loss = -torch.sum(measured_data/torch.sum(measured_data, dim=(2,3), keepdims=True)*constant_factor * torch.log(estimated_data/torch.sum(estimated_data, dim=(2,3), keepdims=True)*constant_factor + 1e-10) - estimated_data/torch.sum(estimated_data, dim=(2,3), keepdims=True)*constant_factor) + config['regularize_factor'] * torch.sum(torch.abs(pot_optim))
+                elif config["loss_function"] == "chi_square":
+                    loss = torch.sum(
+                            (estimated_data*config['dose_measured'] - measured_data*config['dose_measured'])**2 * 1/(estimated_data*config['dose_measured'])
+                            #torch.where(estimated_data*config['dose_measured']>1, 1/(estimated_data*config['dose_measured']), 0)
+                    )
+                else:
+                    raise ValueError(f"Unknown loss function: {config['loss_function']}")
+            else:
+                loss = (torch.norm(estimated_data / torch.sum(estimated_data, dim=(2,3), keepdims=True)
+                                            - measured_data / torch.sum(measured_data, dim=(2,3), keepdims=True))**2 + config['regularize_factor'] * torch.sum(torch.abs(pot_optim)))
             
             # Backpropagation and parameter update
             loss.backward(retain_graph=True)
@@ -302,58 +343,58 @@ def run_optimiser(
         potential_abs = pot_optim[1].detach() #.cpu().detach().numpy()
 
         if kmin_cutoff==0:
-            potential_els[smatrix_np.beam_indices[0, 0:smatrix_np.n_beam//2], 
-                          smatrix_np.beam_indices[1, 0:smatrix_np.n_beam//2]] \
-                         = obf_initial[0:smatrix_np.n_beam//2]*Wg_els
-            potential_els[smatrix_np.beam_indices[0, smatrix_np.n_beam//2+1:smatrix_np.n_beam], 
-                          smatrix_np.beam_indices[1, smatrix_np.n_beam//2+1:smatrix_np.n_beam]] \
-                         = obf_initial[smatrix_np.n_beam//2+1:smatrix_np.n_beam] * torch.flip(Wg_els.conj(), dims=(0,))
-            potential_abs[smatrix_np.beam_indices[0, 0:smatrix_np.n_beam//2], 
-                          smatrix_np.beam_indices[1, 0:smatrix_np.n_beam//2]] \
-                         = obf_initial[0:smatrix_np.n_beam//2]*Wg_abs
-            potential_abs[smatrix_np.beam_indices[0, smatrix_np.n_beam//2+1:smatrix_np.n_beam], 
-                          smatrix_np.beam_indices[1, smatrix_np.n_beam//2+1:smatrix_np.n_beam]] \
-                         = obf_initial[smatrix_np.n_beam//2+1:smatrix_np.n_beam] * torch.flip(Wg_abs.conj(), dims=(0,))
+            potential_els[smatrix_preprocess.beam_indices[0, 0:smatrix_preprocess.n_beam//2], 
+                          smatrix_preprocess.beam_indices[1, 0:smatrix_preprocess.n_beam//2]] \
+                         = obf_initial[0:smatrix_preprocess.n_beam//2]*Wg_els
+            potential_els[smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam], 
+                          smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam]] \
+                         = obf_initial[smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam] * torch.flip(Wg_els.conj(), dims=(0,))
+            potential_abs[smatrix_preprocess.beam_indices[0, 0:smatrix_preprocess.n_beam//2], 
+                          smatrix_preprocess.beam_indices[1, 0:smatrix_preprocess.n_beam//2]] \
+                         = obf_initial[0:smatrix_preprocess.n_beam//2]*Wg_abs
+            potential_abs[smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam], 
+                          smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam]] \
+                         = obf_initial[smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam] * torch.flip(Wg_abs.conj(), dims=(0,))
         else:
-            potential_els[smatrix_np.beam_indices[0, 0:smatrix_np.n_beam//2], 
-                          smatrix_np.beam_indices[1, 0:smatrix_np.n_beam//2]] \
-                         = obf_initial[0:smatrix_np.n_beam//2]*Wg_els
-            potential_els[smatrix_np.beam_indices[0, smatrix_np.n_beam//2:smatrix_np.n_beam], 
-                          smatrix_np.beam_indices[1, smatrix_np.n_beam//2:smatrix_np.n_beam]]   \
-                         = obf_initial[smatrix_np.n_beam//2:smatrix_np.n_beam] * torch.flip(Wg_els.conj(), dims=(0,))
-            potential_abs[smatrix_np.beam_indices[0, 0:smatrix_np.n_beam//2], 
-                          smatrix_np.beam_indices[1, 0:smatrix_np.n_beam//2]] \
-                         = obf_initial[0:smatrix_np.n_beam//2]*Wg_abs
-            potential_abs[smatrix_np.beam_indices[0, smatrix_np.n_beam//2:smatrix_np.n_beam], 
-                          smatrix_np.beam_indices[1, smatrix_np.n_beam//2:smatrix_np.n_beam]] \
-                         = obf_initial[smatrix_np.n_beam//2:smatrix_np.n_beam] * torch.flip(Wg_abs.conj(), dims=(0,))
+            potential_els[smatrix_preprocess.beam_indices[0, 0:smatrix_preprocess.n_beam//2], 
+                          smatrix_preprocess.beam_indices[1, 0:smatrix_preprocess.n_beam//2]] \
+                         = obf_initial[0:smatrix_preprocess.n_beam//2]*Wg_els
+            potential_els[smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam], 
+                          smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam]]   \
+                         = obf_initial[smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam] * torch.flip(Wg_els.conj(), dims=(0,))
+            potential_abs[smatrix_preprocess.beam_indices[0, 0:smatrix_preprocess.n_beam//2], 
+                          smatrix_preprocess.beam_indices[1, 0:smatrix_preprocess.n_beam//2]] \
+                         = obf_initial[0:smatrix_preprocess.n_beam//2]*Wg_abs
+            potential_abs[smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam], 
+                          smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam]] \
+                         = obf_initial[smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam] * torch.flip(Wg_abs.conj(), dims=(0,))
         
         # After finishing the inner loop, update the filters
         if kmin_cutoff==0:
-            filter_els[smatrix_np.beam_indices[0, 0:smatrix_np.n_beam//2],
-                        smatrix_np.beam_indices[1, 0:smatrix_np.n_beam//2]] \
+            filter_els[smatrix_preprocess.beam_indices[0, 0:smatrix_preprocess.n_beam//2],
+                        smatrix_preprocess.beam_indices[1, 0:smatrix_preprocess.n_beam//2]] \
                         = Wg_els
-            filter_els[smatrix_np.beam_indices[0, smatrix_np.n_beam//2+1:smatrix_np.n_beam],
-                        smatrix_np.beam_indices[1, smatrix_np.n_beam//2+1:smatrix_np.n_beam]] \
+            filter_els[smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam],
+                        smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam]] \
                         = torch.flip(Wg_els.conj(), dims=(0,))
-            filter_abs[smatrix_np.beam_indices[0, 0:smatrix_np.n_beam//2],
-                        smatrix_np.beam_indices[1, 0:smatrix_np.n_beam//2]] \
+            filter_abs[smatrix_preprocess.beam_indices[0, 0:smatrix_preprocess.n_beam//2],
+                        smatrix_preprocess.beam_indices[1, 0:smatrix_preprocess.n_beam//2]] \
                         = Wg_abs
-            filter_abs[smatrix_np.beam_indices[0, smatrix_np.n_beam//2+1:smatrix_np.n_beam],
-                        smatrix_np.beam_indices[1, smatrix_np.n_beam//2+1:smatrix_np.n_beam]] \
+            filter_abs[smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam],
+                        smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2+1:smatrix_preprocess.n_beam]] \
                         = torch.flip(Wg_abs.conj(), dims=(0,))
         else:
-            filter_els[smatrix_np.beam_indices[0, 0:smatrix_np.n_beam//2],
-                        smatrix_np.beam_indices[1, 0:smatrix_np.n_beam//2]] \
+            filter_els[smatrix_preprocess.beam_indices[0, 0:smatrix_preprocess.n_beam//2],
+                        smatrix_preprocess.beam_indices[1, 0:smatrix_preprocess.n_beam//2]] \
                         = Wg_els
-            filter_els[smatrix_np.beam_indices[0, smatrix_np.n_beam//2:smatrix_np.n_beam],
-                        smatrix_np.beam_indices[1, smatrix_np.n_beam//2:smatrix_np.n_beam]] \
+            filter_els[smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam],
+                        smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam]] \
                         = torch.flip(Wg_els.conj(), dims=(0,))
-            filter_abs[smatrix_np.beam_indices[0, 0:smatrix_np.n_beam//2],
-                        smatrix_np.beam_indices[1, 0:smatrix_np.n_beam//2]] \
+            filter_abs[smatrix_preprocess.beam_indices[0, 0:smatrix_preprocess.n_beam//2],
+                        smatrix_preprocess.beam_indices[1, 0:smatrix_preprocess.n_beam//2]] \
                         = Wg_abs
-            filter_abs[smatrix_np.beam_indices[0, smatrix_np.n_beam//2:smatrix_np.n_beam],
-                        smatrix_np.beam_indices[1, smatrix_np.n_beam//2:smatrix_np.n_beam]] \
+            filter_abs[smatrix_preprocess.beam_indices[0, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam],
+                        smatrix_preprocess.beam_indices[1, smatrix_preprocess.n_beam//2:smatrix_preprocess.n_beam]] \
                         = torch.flip(Wg_abs.conj(), dims=(0,))
 
 
@@ -383,3 +424,19 @@ def run_optimiser(
     }
     print("Iteration complete")
     return results
+
+
+
+def cbed_resize_rotation(cbed, angle_rad, size, interpolate_mode='bicubic'):
+    theta = torch.tensor([
+        [torch.cos(angle_rad), -torch.sin(angle_rad), 0],
+        [torch.sin(angle_rad), torch.cos(angle_rad), 0]
+    ], dtype=cbed.dtype, device=cbed.device).unsqueeze(0)
+
+    theta_repeat = theta.repeat(cbed.size(0), 1, 1)
+
+    grid = F.affine_grid(theta_repeat, cbed.size(), align_corners=False)
+    rotated_image = F.grid_sample(cbed, grid, mode=interpolate_mode, padding_mode='zeros', align_corners=False)
+    resized_image = F.interpolate(rotated_image, size=size, mode=interpolate_mode) 
+    
+    return resized_image

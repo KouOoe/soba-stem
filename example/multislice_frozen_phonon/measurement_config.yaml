@@ -1,13 +1,13 @@
 # path to the 4D STEM data
-path_4dstem_data: /path/to/4d_data
+path_4dstem_data: "./multislice_frozen_phonon/300kV20mrad_20nm_sourcesize_0.0A_dose_6400_cbed_data.tif"
 
 # imaging condition
 voltage: 300  # in kV
 aperture: 20  # in mrad
 
 # sampling condition
-sampling_real_space: [0.1, 0.1]  # in angstroms
-sampling_reciprocal_space: [0.01, 0.01]  # in inverse angstroms
+sampling_scanning_space: [0.21694, 0.21694]  # in angstroms
+sampling_reciprocal_space: [0.08536, 0.08536]  # in inverse angstroms
 
 # detector parameters
 rotation_offset_diff_plane_deg: 0.0  # in degrees

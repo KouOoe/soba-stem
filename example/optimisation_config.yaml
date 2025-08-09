@@ -7,7 +7,7 @@ n_iter_ary: [50, 950]
 kmax_optim_ary: [0.5, 1.0] # range of beams to be optimised (ratio to kmax_optim)
 
 #initial parameters ###
-thickness_init:  350
+thickness_init:  220
 defocus_init:    -100
 sourcesize_init: 0.0
 ratio_GaussToLorentz: 1

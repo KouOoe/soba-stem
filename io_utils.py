@@ -1,7 +1,6 @@
 import matplotlib.pyplot as plt
 from tifffile import imwrite
 import numpy as np
-import torch
 
 def save_image(image, filename):
     """

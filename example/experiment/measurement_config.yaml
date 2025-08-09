@@ -1,0 +1,13 @@
+# path to the 4D STEM data
+path_4dstem_data: "./experiment/measurement_config.yamlexperimtnal_4dstem_data_empad.tif"
+
+# imaging condition
+voltage:  300    # in kV
+aperture: 18.4  # in mrad
+
+# sampling condition
+sampling_scanning_space: [0.1562, 0.1562]  # in angstroms
+sampling_reciprocal_space: [0.082325, 0.082325]  # in inverse angstroms
+
+# detector parameters
+rotation_offset_diff_plane_deg: 82.3  # diff. plane rotation offset in degrees
