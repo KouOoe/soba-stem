@@ -1,5 +1,5 @@
 # path to the 4D STEM data
-path_4dstem_data: "./multislice_frozen_phonon/300kV20mrad_20nm_sourcesize_0.0A_dose_6400_cbed_data.tif"
+path_4dstem_data: "../data/multislice_frozen_phonon/300kV20mrad_20nm_sourcesize_0.0A_dose_6400_cbed_data.tif"
 
 # imaging condition
 voltage: 300  # in kV
