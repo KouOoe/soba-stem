@@ -82,9 +82,11 @@ class PixelatedDataProcess():
         self.ky, self.kx = self.nky*self.dky, self.nkx*self.dkx
         self.ry, self.rx = self.nry*self.dry, self.nrx*self.drx
 
+        self.qy = np.fft.fftfreq(self.nry, d=self.dry)
+        self.qx = np.fft.fftfreq(self.nrx, d=self.drx)
         self.qgrid = np.meshgrid(
-            np.fft.fftfreq(self.nry, d=self.dry),
-            np.fft.fftfreq(self.nrx, d=self.drx),
+            self.qy,
+            self.qx,
             indexing='ij'
         )
 
@@ -194,3 +196,42 @@ class PixelatedDataProcess():
                 obf   = np.fft.ifft2(obf)/self.ry/self.rx*self.nry*self.nrx
 
         return obf/self.dky/self.dkx
+    
+
+    def COM(self, det_rot=0):
+
+        kx_rot = self.kgrid[1]*np.cos(det_rot) + self.kgrid[0]*np.sin(det_rot)
+        ky_rot =-self.kgrid[1]*np.sin(det_rot) + self.kgrid[0]*np.cos(det_rot)
+
+        cbed_sum = np.sum(np.sum(self.cbed_data, axis=3), axis=2)
+
+        COMx = np.sum(np.sum(self.cbed_data * kx_rot, axis=3), axis=2) / np.where(cbed_sum==0,1,cbed_sum)
+        COMy = np.sum(np.sum(self.cbed_data * ky_rot, axis=3), axis=2) / np.where(cbed_sum==0,1,cbed_sum)
+
+        return [COMy, COMx]
+
+
+    def iCOM(self, det_rot=0):
+
+        COMx = self.COM(det_rot)[1]
+        COMy = self.COM(det_rot)[0]
+
+        icom = (self.qgrid[1]*np.fft.fft2(COMx) + self.qgrid[0]*np.fft.fft2(COMy)) / np.where(self.qgrid[0]**2+self.qgrid[1]**2==0, 1, (2*np.pi*1j*(self.qgrid[0]**2+self.qgrid[1]**2)))
+        icom = np.fft.ifft2(icom).real
+
+        return icom
+    
+
+    def COM_curl(self, det_rot=0):
+
+        kx_rot = self.kgrid[1]*np.cos(det_rot) + self.kgrid[0]*np.sin(det_rot)
+        ky_rot =-self.kgrid[1]*np.sin(det_rot) + self.kgrid[0]*np.cos(det_rot)
+
+        cbed_sum = np.sum(np.sum(self.cbed_data, axis=3), axis=2)
+
+        COMx = np.sum(np.sum(self.cbed_data * kx_rot, axis=3), axis=2) / np.where(cbed_sum==0,1,cbed_sum)
+        COMy = np.sum(np.sum(self.cbed_data * ky_rot, axis=3), axis=2) / np.where(cbed_sum==0,1,cbed_sum)
+
+        curl = -np.gradient(COMx, axis=0) + np.gradient(COMy, axis=1)
+
+        return curl
